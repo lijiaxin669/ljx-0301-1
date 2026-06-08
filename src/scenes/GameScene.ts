@@ -4,6 +4,7 @@ import { getLevelConfig, isLastLevel, getMaxLevel } from '../config/levels';
 import { shouldSpawnPowerUp, getPowerUpConfig } from '../config/powerups';
 import { ScoreManager } from '../utils/ScoreManager';
 import { BuffManager } from '../utils/BuffManager';
+import { calculateBaseScore, calculateTotalScore } from '../utils/scoreCalculator';
 import { GameState, RedPacketConfig, LevelResult, GameOverData, PowerUpItem, PowerUpConfig } from '../types';
 import { LevelConfig } from '../config/levels';
 import { PowerUpType } from '../types/powerup';
@@ -408,7 +409,7 @@ export class GameScene extends Phaser.Scene {
       item.setTexture(`packet_${packetType.type}`);
       item.itemType = 'redpacket';
       item.packetConfig = packetType;
-      item.baseScore = Math.floor(packetType.score * this.levelConfig.difficulty.scoreMultiplier);
+      item.baseScore = calculateBaseScore(packetType.score, this.levelConfig.difficulty.scoreMultiplier);
     }
 
     item.setActive(true);
@@ -490,12 +491,12 @@ export class GameScene extends Phaser.Scene {
     }
 
     const baseScore = item.baseScore || 10;
-    const comboBonus = Math.floor(baseScore * this.gameState.combo * GAME_CONFIG.comboBonusMultiplier);
-    let totalScore = baseScore + comboBonus;
-
-    if (this.buffManager.hasBuff('double_score')) {
-      totalScore *= 2;
-    }
+    const totalScore = calculateTotalScore({
+      baseScore,
+      scoreMultiplier: this.levelConfig.difficulty.scoreMultiplier,
+      combo: this.gameState.combo,
+      hasDoubleScore: this.buffManager.hasBuff('double_score'),
+    });
 
     this.gameState.levelScore += totalScore;
     this.gameState.totalScore += totalScore;
