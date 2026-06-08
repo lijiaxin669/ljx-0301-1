@@ -1,27 +1,32 @@
 import Phaser from 'phaser';
 import { GAME_CONFIG, COLORS } from '../config/gameConfig';
 import { ScoreManager } from '../utils/ScoreManager';
-
-interface GameResult {
-  score: number;
-  maxCombo: number;
-  timeLeft: number;
-}
+import { GameOverData } from '../types';
+import { getMaxLevel } from '../config/levels';
 
 export class GameOverScene extends Phaser.Scene {
-  private result!: GameResult;
+  private result!: GameOverData;
   private rankMessage!: string;
   private isNewHighScore!: boolean;
+  private isNewHighLevel!: boolean;
 
   constructor() {
     super('GameOverScene');
   }
 
-  init(data: GameResult): void {
-    this.result = data || { score: 0, maxCombo: 0, timeLeft: 0 };
-    this.rankMessage = ScoreManager.getRankMessage(this.result.score);
+  init(data: GameOverData): void {
+    this.result = data || {
+      totalScore: 0,
+      maxCombo: 0,
+      highestLevel: 1,
+      levelsCompleted: 0,
+      reason: 'timeout',
+    };
+    this.rankMessage = ScoreManager.getRankMessage(this.result.totalScore);
     const highScore = ScoreManager.getHighScore();
-    this.isNewHighScore = this.result.score >= highScore && this.result.score > 0;
+    const highLevel = ScoreManager.getHighLevel();
+    this.isNewHighScore = this.result.totalScore >= highScore && this.result.totalScore > 0;
+    this.isNewHighLevel = this.result.highestLevel > highLevel && this.result.levelsCompleted > 0;
   }
 
   create(): void {
@@ -32,16 +37,17 @@ export class GameOverScene extends Phaser.Scene {
 
     this.addConfetti();
 
-    const titleText = this.isNewHighScore ? '🎉 新纪录！🎉' : '游戏结束';
-    const title = this.add.text(centerX, 100, titleText, {
-      fontSize: this.isNewHighScore ? '42px' : '48px',
+    const reasonText = this.result.reason === 'lives' ? '💔 生命耗尽' : '⏰ 时间到';
+    const titleText = this.isNewHighScore || this.isNewHighLevel ? '🎉 新纪录！🎉' : reasonText;
+    const title = this.add.text(centerX, 80, titleText, {
+      fontSize: this.isNewHighScore || this.isNewHighLevel ? '42px' : '40px',
       fontFamily: 'Microsoft YaHei',
-      color: this.isNewHighScore ? '#ffd700' : '#ff6b6b',
+      color: this.isNewHighScore || this.isNewHighLevel ? '#ffd700' : '#ff6b6b',
       stroke: '#000000',
       strokeThickness: 6,
     }).setOrigin(0.5);
 
-    if (this.isNewHighScore) {
+    if (this.isNewHighScore || this.isNewHighLevel) {
       this.tweens.add({
         targets: title,
         scale: { from: 0.8, to: 1.1 },
@@ -52,13 +58,22 @@ export class GameOverScene extends Phaser.Scene {
       });
     }
 
-    const scoreLabel = this.add.text(centerX, 180, '本次得分', {
+    const levelInfo = this.add.text(centerX, 130,
+      `到达关卡: 第${this.result.highestLevel}关 | 通过: ${this.result.levelsCompleted}/${getMaxLevel()}关`, {
+      fontSize: '22px',
+      fontFamily: 'Microsoft YaHei',
+      color: this.isNewHighLevel ? '#44ff44' : '#ffcc00',
+      stroke: '#000000',
+      strokeThickness: 2,
+    }).setOrigin(0.5);
+
+    const scoreLabel = this.add.text(centerX, 180, '总得分', {
       fontSize: '24px',
       fontFamily: 'Microsoft YaHei',
       color: '#cccccc',
     }).setOrigin(0.5);
 
-    const scoreValue = this.add.text(centerX, 230, String(this.result.score), {
+    const scoreValue = this.add.text(centerX, 230, String(this.result.totalScore), {
       fontSize: '72px',
       fontFamily: 'Microsoft YaHei',
       color: '#ffd700',
@@ -73,12 +88,14 @@ export class GameOverScene extends Phaser.Scene {
       ease: 'Back.easeOut',
     });
 
-    const statsContainer = this.add.container(centerX, 340);
+    const statsContainer = this.add.container(centerX, 330);
 
     const highScore = ScoreManager.getHighScore();
+    const highLevel = ScoreManager.getHighLevel();
     const stats = [
       { label: '最高连击', value: `${this.result.maxCombo} 连`, color: '#ff6b6b' },
-      { label: '最高分', value: String(highScore), color: '#ffd700' },
+      { label: '历史最高分', value: String(highScore), color: '#ffd700' },
+      { label: '历史最高关卡', value: `第${highLevel}关`, color: '#44ff44' },
     ];
 
     stats.forEach((stat, i) => {
@@ -100,16 +117,16 @@ export class GameOverScene extends Phaser.Scene {
       statsContainer.add([bg, label, value]);
     });
 
-    const rankBg = this.add.rectangle(centerX, 470, 400, 80, 0x6b3a2a, 0.9)
+    const rankBg = this.add.rectangle(centerX, 480, 400, 80, 0x6b3a2a, 0.9)
       .setOrigin(0.5);
 
-    this.add.text(centerX, 445, '🏆 战绩评价', {
+    this.add.text(centerX, 455, '🏆 战绩评价', {
       fontSize: '20px',
       fontFamily: 'Microsoft YaHei',
       color: '#ffd700',
     }).setOrigin(0.5);
 
-    const rankText = this.add.text(centerX, 480, this.rankMessage, {
+    const rankText = this.add.text(centerX, 490, this.rankMessage, {
       fontSize: '22px',
       fontFamily: 'Microsoft YaHei',
       color: '#ffffff',
@@ -117,7 +134,7 @@ export class GameOverScene extends Phaser.Scene {
       wordWrap: { width: 380 },
     }).setOrigin(0.5);
 
-    const restartBtn = this.add.text(centerX, 580, '再来一局', {
+    const restartBtn = this.add.text(centerX, 580, '重新挑战', {
       fontSize: '32px',
       fontFamily: 'Microsoft YaHei',
       color: '#ffffff',
@@ -134,7 +151,7 @@ export class GameOverScene extends Phaser.Scene {
     });
 
     restartBtn.on('pointerdown', () => {
-      this.scene.start('GameScene');
+      this.scene.start('GameScene', { startLevel: 1 });
     });
 
     const menuBtn = this.add.text(centerX, 650, '返回主菜单', {
@@ -156,11 +173,11 @@ export class GameOverScene extends Phaser.Scene {
     });
 
     this.input.keyboard?.on('keydown-SPACE', () => {
-      this.scene.start('GameScene');
+      this.scene.start('GameScene', { startLevel: 1 });
     });
 
     this.input.keyboard?.on('keydown-ENTER', () => {
-      this.scene.start('GameScene');
+      this.scene.start('GameScene', { startLevel: 1 });
     });
 
     this.input.keyboard?.on('keydown-ESC', () => {

@@ -1,17 +1,20 @@
-import { ScoreRecord } from '../types';
+import { ScoreRecord, GameOverData } from '../types';
 import { RANK_MESSAGES } from '../config/gameConfig';
 
 const STORAGE_KEY = 'red_packet_game_scores';
 const HIGH_SCORE_KEY = 'red_packet_high_score';
+const HIGH_LEVEL_KEY = 'red_packet_high_level';
 const MAX_RECORDS = 10;
 
 export class ScoreManager {
-  static saveScore(score: number, maxCombo: number): void {
+  static saveScore(data: GameOverData): void {
     try {
       const records = this.getScoreRecords();
       const newRecord: ScoreRecord = {
-        score,
-        maxCombo,
+        score: data.totalScore,
+        maxCombo: data.maxCombo,
+        highestLevel: data.highestLevel,
+        levelsCompleted: data.levelsCompleted,
         date: new Date().toLocaleDateString('zh-CN'),
       };
       records.push(newRecord);
@@ -20,11 +23,25 @@ export class ScoreManager {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(topRecords));
 
       const highScore = this.getHighScore();
-      if (score > highScore) {
-        localStorage.setItem(HIGH_SCORE_KEY, String(score));
+      if (data.totalScore > highScore) {
+        localStorage.setItem(HIGH_SCORE_KEY, String(data.totalScore));
+      }
+
+      const highLevel = this.getHighLevel();
+      if (data.highestLevel > highLevel) {
+        localStorage.setItem(HIGH_LEVEL_KEY, String(data.highestLevel));
       }
     } catch (e) {
       console.error('保存分数失败:', e);
+    }
+  }
+
+  static getHighLevel(): number {
+    try {
+      const stored = localStorage.getItem(HIGH_LEVEL_KEY);
+      return stored ? parseInt(stored, 10) : 0;
+    } catch (e) {
+      return 0;
     }
   }
 

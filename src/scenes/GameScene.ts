@@ -1,7 +1,9 @@
 import Phaser from 'phaser';
 import { GAME_CONFIG, RED_PACKET_TYPES, COLORS } from '../config/gameConfig';
+import { getLevelConfig, isLastLevel, getMaxLevel } from '../config/levels';
 import { ScoreManager } from '../utils/ScoreManager';
-import { GameState, RedPacketConfig } from '../types';
+import { GameState, RedPacketConfig, LevelResult, GameOverData } from '../types';
+import { LevelConfig } from '../config/levels';
 
 interface FallingItem extends Phaser.Physics.Arcade.Sprite {
   itemType?: 'redpacket' | 'bomb';
@@ -16,9 +18,15 @@ export class GameScene extends Phaser.Scene {
   private keyD!: Phaser.Input.Keyboard.Key;
   private items!: Phaser.Physics.Arcade.Group;
   private gameState!: GameState;
+  private levelConfig!: LevelConfig;
   private scoreText!: Phaser.GameObjects.Text;
   private timeText!: Phaser.GameObjects.Text;
   private comboText!: Phaser.GameObjects.Text;
+  private levelText!: Phaser.GameObjects.Text;
+  private targetProgressBar!: Phaser.GameObjects.Graphics;
+  private targetProgressBg!: Phaser.GameObjects.Graphics;
+  private targetText!: Phaser.GameObjects.Text;
+  private multiplierText!: Phaser.GameObjects.Text;
   private heartsContainer!: Phaser.GameObjects.Container;
   private gameTimer!: Phaser.Time.TimerEvent;
   private spawnTimer!: Phaser.Time.TimerEvent;
@@ -27,21 +35,39 @@ export class GameScene extends Phaser.Scene {
   private isGameActive!: boolean;
   private pointerActive!: { left: boolean; right: boolean };
   private touchStartX!: number;
+  private totalScore!: number;
+  private totalMaxCombo!: number;
+  private levelsCompleted!: number;
+  private startLevel!: number;
 
   constructor() {
     super('GameScene');
   }
 
-  init(): void {
+  init(data: { startLevel?: number; totalScore?: number; totalMaxCombo?: number; levelsCompleted?: number }): void {
+    this.startLevel = data?.startLevel || 1;
+    this.totalScore = data?.totalScore || 0;
+    this.totalMaxCombo = data?.totalMaxCombo || 0;
+    this.levelsCompleted = data?.levelsCompleted || 0;
+
+    this.levelConfig = getLevelConfig(this.startLevel);
+
     this.gameState = {
       score: 0,
+      totalScore: this.totalScore,
       lives: GAME_CONFIG.maxLives,
       combo: 0,
       maxCombo: 0,
-      timeLeft: GAME_CONFIG.gameDuration,
+      timeLeft: this.levelConfig.duration,
       difficulty: 0,
       isPaused: false,
+      currentLevel: this.startLevel,
+      targetScore: this.levelConfig.targetScore,
+      levelScore: 0,
+      levelMaxCombo: 0,
+      isLevelComplete: false,
     };
+
     this.comboTimer = null;
     this.lastComboTime = 0;
     this.isGameActive = true;
@@ -56,6 +82,65 @@ export class GameScene extends Phaser.Scene {
     this.setupCollisions();
     this.setupInput();
     this.startGameLoop();
+    this.showLevelStart();
+  }
+
+  private showLevelStart(): void {
+    const centerX = GAME_CONFIG.width / 2;
+    const centerY = GAME_CONFIG.height / 2;
+
+    const overlay = this.add.rectangle(0, 0, GAME_CONFIG.width, GAME_CONFIG.height, 0x000000, 0.7)
+      .setOrigin(0, 0).setDepth(100);
+
+    const levelBadge = this.add.text(centerX, centerY - 60, `第 ${this.gameState.currentLevel} 关`, {
+      fontSize: '48px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#ffd700',
+      stroke: '#000000',
+      strokeThickness: 6,
+    }).setOrigin(0.5).setDepth(101);
+
+    const levelName = this.add.text(centerX, centerY, this.levelConfig.name, {
+      fontSize: '36px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 4,
+    }).setOrigin(0.5).setDepth(101);
+
+    const levelDesc = this.add.text(centerX, centerY + 50, this.levelConfig.description, {
+      fontSize: '20px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#cccccc',
+    }).setOrigin(0.5).setDepth(101);
+
+    const targetInfo = this.add.text(centerX, centerY + 90,
+      `目标: ${this.levelConfig.targetScore}分 | 时限: ${this.levelConfig.duration}秒 | 倍率: x${this.levelConfig.difficulty.scoreMultiplier}`, {
+      fontSize: '18px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#ffcc00',
+    }).setOrigin(0.5).setDepth(101);
+
+    const elements = [overlay, levelBadge, levelName, levelDesc, targetInfo];
+
+    this.tweens.add({
+      targets: [levelBadge, levelName, levelDesc, targetInfo],
+      scale: { from: 0.5, to: 1 },
+      alpha: { from: 0, to: 1 },
+      duration: 500,
+      ease: 'Back.easeOut',
+    });
+
+    this.time.delayedCall(2000, () => {
+      this.tweens.add({
+        targets: elements,
+        alpha: 0,
+        duration: 300,
+        onComplete: () => {
+          elements.forEach(e => e.destroy());
+        },
+      });
+    }, [], this);
   }
 
   private addBackground(): void {
@@ -84,17 +169,33 @@ export class GameScene extends Phaser.Scene {
   }
 
   private createUI(): void {
-    const uiY = 20;
+    const uiY = 15;
 
-    this.scoreText = this.add.text(20, uiY, '得分: 0', {
-      fontSize: '24px',
+    this.levelText = this.add.text(20, uiY, `第${this.gameState.currentLevel}关`, {
+      fontSize: '22px',
       fontFamily: 'Microsoft YaHei',
       color: '#ffd700',
       stroke: '#000000',
       strokeThickness: 3,
     }).setOrigin(0, 0);
 
-    this.timeText = this.add.text(GAME_CONFIG.width - 20, uiY, `时间: ${GAME_CONFIG.gameDuration}s`, {
+    this.multiplierText = this.add.text(20, uiY + 30, `x${this.levelConfig.difficulty.scoreMultiplier}`, {
+      fontSize: '16px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#44ff44',
+      stroke: '#000000',
+      strokeThickness: 2,
+    }).setOrigin(0, 0);
+
+    this.scoreText = this.add.text(GAME_CONFIG.width / 2, uiY, `本关: 0`, {
+      fontSize: '24px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#ffd700',
+      stroke: '#000000',
+      strokeThickness: 3,
+    }).setOrigin(0.5, 0);
+
+    this.timeText = this.add.text(GAME_CONFIG.width - 20, uiY, `${this.gameState.timeLeft}s`, {
       fontSize: '24px',
       fontFamily: 'Microsoft YaHei',
       color: '#ffffff',
@@ -102,16 +203,57 @@ export class GameScene extends Phaser.Scene {
       strokeThickness: 3,
     }).setOrigin(1, 0);
 
-    this.comboText = this.add.text(GAME_CONFIG.width / 2, uiY, '', {
-      fontSize: '28px',
+    this.comboText = this.add.text(GAME_CONFIG.width / 2, uiY + 35, '', {
+      fontSize: '26px',
       fontFamily: 'Microsoft YaHei',
       color: '#ff6b6b',
       stroke: '#000000',
       strokeThickness: 4,
     }).setOrigin(0.5, 0);
 
-    this.heartsContainer = this.add.container(20, 60);
+    const progressY = uiY + 75;
+    const progressWidth = GAME_CONFIG.width - 40;
+    const progressHeight = 16;
+
+    this.targetProgressBg = this.add.graphics();
+    this.targetProgressBg.fillStyle(0x2a1810, 0.8);
+    this.targetProgressBg.fillRoundedRect(20, progressY, progressWidth, progressHeight, 8);
+
+    this.targetProgressBar = this.add.graphics();
+
+    this.targetText = this.add.text(GAME_CONFIG.width / 2, progressY + progressHeight / 2,
+      `目标: ${this.gameState.targetScore}`, {
+      fontSize: '14px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 2,
+    }).setOrigin(0.5, 0.5);
+
+    this.heartsContainer = this.add.container(20, progressY + progressHeight + 15);
     this.updateHearts();
+
+    this.updateProgressBar();
+  }
+
+  private updateProgressBar(): void {
+    const progressY = 90;
+    const progressWidth = GAME_CONFIG.width - 40;
+    const progressHeight = 16;
+    const progress = Math.min(this.gameState.levelScore / this.gameState.targetScore, 1);
+    const barWidth = progressWidth * progress;
+
+    this.targetProgressBar.clear();
+    const color = progress >= 1 ? 0x44ff44 : (progress >= 0.7 ? 0xffd700 : 0xff6b6b);
+    this.targetProgressBar.fillStyle(color, 1);
+    this.targetProgressBar.fillRoundedRect(22, progressY + 2, Math.max(barWidth - 4, 0), progressHeight - 4, 6);
+
+    this.targetText.setText(`目标: ${this.gameState.levelScore} / ${this.gameState.targetScore}`);
+
+    if (progress >= 1 && !this.gameState.isLevelComplete) {
+      this.gameState.isLevelComplete = true;
+      this.handleLevelComplete();
+    }
   }
 
   private updateHearts(): void {
@@ -191,14 +333,21 @@ export class GameScene extends Phaser.Scene {
     this.scheduleNextSpawn();
   }
 
+  private getCurrentDifficulty(): number {
+    const levelProgress = 1 - this.gameState.timeLeft / this.levelConfig.duration;
+    return Math.min(levelProgress, 1);
+  }
+
   private scheduleNextSpawn(): void {
-    const progress = 1 - this.gameState.timeLeft / GAME_CONFIG.gameDuration;
-    const difficulty = Math.min(progress, 1);
+    if (!this.isGameActive) return;
+
+    const difficulty = this.getCurrentDifficulty();
     this.gameState.difficulty = difficulty;
 
+    const diff = this.levelConfig.difficulty;
     const spawnInterval = Phaser.Math.Linear(
-      GAME_CONFIG.initialSpawnInterval,
-      GAME_CONFIG.minSpawnInterval,
+      diff.spawnInterval.max,
+      diff.spawnInterval.min,
       difficulty
     );
 
@@ -209,24 +358,26 @@ export class GameScene extends Phaser.Scene {
   private spawnItem(): void {
     if (!this.isGameActive) return;
 
-    const difficulty = this.gameState.difficulty;
+    const difficulty = this.getCurrentDifficulty();
+    const diff = this.levelConfig.difficulty;
     const bombChance = Phaser.Math.Linear(
-      GAME_CONFIG.bombBaseChance,
-      GAME_CONFIG.maxBombChance,
+      diff.bombChance.min,
+      diff.bombChance.max,
       difficulty
     );
 
     const isBomb = Math.random() < bombChance;
 
     let item: FallingItem;
-    const textureKey = isBomb ? 'bomb' : '';
-
     item = this.items.get(
       Phaser.Math.Between(40, GAME_CONFIG.width - 40),
       -50
     ) as FallingItem;
 
-    if (!item) return;
+    if (!item) {
+      this.scheduleNextSpawn();
+      return;
+    }
 
     if (isBomb) {
       item.setTexture('bomb');
@@ -238,7 +389,7 @@ export class GameScene extends Phaser.Scene {
       item.setTexture(`packet_${packetType.type}`);
       item.itemType = 'redpacket';
       item.packetConfig = packetType;
-      item.baseScore = packetType.score;
+      item.baseScore = Math.floor(packetType.score * this.levelConfig.difficulty.scoreMultiplier);
     }
 
     item.setActive(true);
@@ -248,11 +399,11 @@ export class GameScene extends Phaser.Scene {
       item.body.reset(item.x, item.y);
       item.body.enable = true;
     }
-    item.setScale(isBomb ? 1 : 1);
+    item.setScale(1);
 
     const fallSpeed = Phaser.Math.Linear(
-      GAME_CONFIG.initialFallSpeed,
-      GAME_CONFIG.maxFallSpeed,
+      diff.fallSpeed.min,
+      diff.fallSpeed.max,
       difficulty
     ) * Phaser.Math.FloatBetween(0.85, 1.15);
 
@@ -309,13 +460,18 @@ export class GameScene extends Phaser.Scene {
     if (this.gameState.combo > this.gameState.maxCombo) {
       this.gameState.maxCombo = this.gameState.combo;
     }
+    if (this.gameState.combo > this.gameState.levelMaxCombo) {
+      this.gameState.levelMaxCombo = this.gameState.combo;
+    }
 
     const baseScore = item.baseScore || 10;
     const comboBonus = Math.floor(baseScore * this.gameState.combo * GAME_CONFIG.comboBonusMultiplier);
     const totalScore = baseScore + comboBonus;
-    this.gameState.score += totalScore;
+    this.gameState.levelScore += totalScore;
+    this.gameState.totalScore += totalScore;
 
     this.updateScore();
+    this.updateProgressBar();
     this.showCombo();
     this.showScorePopup(item.x, item.y, totalScore);
 
@@ -355,7 +511,46 @@ export class GameScene extends Phaser.Scene {
     });
 
     if (this.gameState.lives <= 0) {
-      this.endGame();
+      this.endGame('lives');
+    }
+  }
+
+  private handleLevelComplete(): void {
+    this.isGameActive = false;
+    this.clearTimers();
+    this.stopAllItems();
+
+    const levelResult: LevelResult = {
+      level: this.gameState.currentLevel,
+      levelName: this.levelConfig.name,
+      score: this.gameState.levelScore,
+      targetScore: this.gameState.targetScore,
+      timeLeft: this.gameState.timeLeft,
+      maxCombo: this.gameState.levelMaxCombo,
+      passed: true,
+      isLastLevel: isLastLevel(this.gameState.currentLevel),
+    };
+
+    const newTotalMaxCombo = Math.max(this.totalMaxCombo, this.gameState.maxCombo);
+
+    if (levelResult.isLastLevel) {
+      this.time.delayedCall(800, () => {
+        this.scene.start('LevelCompleteScene', {
+          ...levelResult,
+          totalScore: this.gameState.totalScore,
+          totalMaxCombo: newTotalMaxCombo,
+          levelsCompleted: this.levelsCompleted + 1,
+        });
+      }, [], this);
+    } else {
+      this.time.delayedCall(800, () => {
+        this.scene.start('LevelCompleteScene', {
+          ...levelResult,
+          totalScore: this.gameState.totalScore,
+          totalMaxCombo: newTotalMaxCombo,
+          levelsCompleted: this.levelsCompleted + 1,
+        });
+      }, [], this);
     }
   }
 
@@ -424,7 +619,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateScore(): void {
-    this.scoreText.setText(`得分: ${this.gameState.score}`);
+    this.scoreText.setText(`本关: ${this.gameState.levelScore}`);
     this.tweens.add({
       targets: this.scoreText,
       scale: { from: 1.1, to: 1 },
@@ -437,21 +632,28 @@ export class GameScene extends Phaser.Scene {
     if (!this.isGameActive) return;
 
     this.gameState.timeLeft--;
-    this.timeText.setText(`时间: ${this.gameState.timeLeft}s`);
+    this.timeText.setText(`${this.gameState.timeLeft}s`);
 
     if (this.gameState.timeLeft <= 10) {
       this.timeText.setColor('#ff4444');
-      this.tweens.add({
-        targets: this.timeText,
-        scale: { from: 1.1, to: 1 },
-        duration: 200,
-        yoyo: true,
-        repeat: -1,
-      });
+      if (!this.timeText.getData('isTweening')) {
+        this.timeText.setData('isTweening', true);
+        this.tweens.add({
+          targets: this.timeText,
+          scale: { from: 1.1, to: 1 },
+          duration: 200,
+          yoyo: true,
+          repeat: -1,
+        });
+      }
     }
 
     if (this.gameState.timeLeft <= 0) {
-      this.endGame();
+      if (this.gameState.levelScore >= this.gameState.targetScore) {
+        this.handleLevelComplete();
+      } else {
+        this.endGame('timeout');
+      }
     }
   }
 
@@ -489,15 +691,13 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  private endGame(): void {
-    this.isGameActive = false;
-
+  private clearTimers(): void {
     if (this.gameTimer) this.gameTimer.remove();
     if (this.spawnTimer) this.spawnTimer.remove();
     if (this.comboTimer) this.comboTimer.remove();
+  }
 
-    ScoreManager.saveScore(this.gameState.score, this.gameState.maxCombo);
-
+  private stopAllItems(): void {
     this.items.children.each((child) => {
       const item = child as FallingItem;
       if (item.body) {
@@ -505,13 +705,25 @@ export class GameScene extends Phaser.Scene {
       }
       return null;
     });
+  }
+
+  private endGame(reason: 'timeout' | 'lives'): void {
+    this.isGameActive = false;
+    this.clearTimers();
+    this.stopAllItems();
+
+    const gameOverData: GameOverData = {
+      totalScore: this.gameState.totalScore,
+      maxCombo: Math.max(this.totalMaxCombo, this.gameState.maxCombo),
+      highestLevel: this.gameState.currentLevel,
+      levelsCompleted: this.levelsCompleted,
+      reason,
+    };
+
+    ScoreManager.saveScore(gameOverData);
 
     this.time.delayedCall(500, () => {
-      this.scene.start('GameOverScene', {
-        score: this.gameState.score,
-        maxCombo: this.gameState.maxCombo,
-        timeLeft: this.gameState.timeLeft,
-      });
+      this.scene.start('GameOverScene', gameOverData);
     }, [], this);
   }
 }
