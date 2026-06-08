@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { GAME_CONFIG, COLORS, RED_PACKET_TYPES } from '../config/gameConfig';
+import { POWERUP_CONFIGS } from '../config/powerups';
 
 export class BootScene extends Phaser.Scene {
   constructor() {
@@ -18,6 +19,7 @@ export class BootScene extends Phaser.Scene {
     this.createRedPacketTextures();
     this.createBombTexture();
     this.createHeartTexture();
+    this.createPowerUpTextures();
   }
 
   private createParticleTexture(): void {
@@ -163,5 +165,50 @@ export class BootScene extends Phaser.Scene {
     graphics.fillRect(cx - 3, cy - 9, 6, 18);
     graphics.generateTexture('heart', w, h);
     graphics.destroy();
+  }
+
+  private createPowerUpTextures(): void {
+    for (const config of POWERUP_CONFIGS) {
+      const size = 50;
+      const w = size + 10;
+      const h = size + 10;
+      const cx = w / 2;
+      const cy = h / 2;
+
+      const graphics = this.make.graphics({ x: 0, y: 0 });
+      graphics.fillStyle(config.bgColor);
+      graphics.lineStyle(3, config.color, 1);
+      graphics.beginPath();
+      graphics.arc(cx, cy, size / 2, 0, Math.PI * 2);
+      graphics.fillPath();
+      graphics.strokePath();
+
+      graphics.fillStyle(config.color);
+      graphics.beginPath();
+      graphics.arc(cx, cy, size / 2 - 6, 0, Math.PI * 2);
+      graphics.fillPath();
+
+      graphics.fillStyle(0xffffff);
+      graphics.beginPath();
+      graphics.arc(cx - size * 0.15, cy - size * 0.15, size * 0.1, 0, Math.PI * 2);
+      graphics.fillPath();
+
+      const icon = this.add.text(cx, cy, config.icon, {
+        fontSize: `${size * 0.45}px`,
+        fontFamily: 'Microsoft YaHei',
+        color: '#ffffff',
+        stroke: '#000000',
+        strokeThickness: 2,
+      }).setOrigin(0.5);
+
+      const rt = this.make.renderTexture({ x: w / 2, y: h / 2, width: w, height: h });
+      rt.draw(graphics);
+      rt.draw(icon);
+      rt.saveTexture(`powerup_${config.type}`);
+
+      icon.destroy();
+      graphics.destroy();
+      rt.destroy();
+    }
   }
 }

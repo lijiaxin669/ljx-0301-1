@@ -49,3 +49,6 @@ export interface GameOverData {
   levelsCompleted: number;
   reason: 'timeout' | 'lives' | 'complete';
 }
+
+export * from './powerup';
+

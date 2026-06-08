@@ -1,15 +1,14 @@
 import Phaser from 'phaser';
 import { GAME_CONFIG, RED_PACKET_TYPES, COLORS } from '../config/gameConfig';
 import { getLevelConfig, isLastLevel, getMaxLevel } from '../config/levels';
+import { shouldSpawnPowerUp, getPowerUpConfig } from '../config/powerups';
 import { ScoreManager } from '../utils/ScoreManager';
-import { GameState, RedPacketConfig, LevelResult, GameOverData } from '../types';
+import { BuffManager } from '../utils/BuffManager';
+import { GameState, RedPacketConfig, LevelResult, GameOverData, PowerUpItem, PowerUpConfig } from '../types';
 import { LevelConfig } from '../config/levels';
+import { PowerUpType } from '../types/powerup';
 
-interface FallingItem extends Phaser.Physics.Arcade.Sprite {
-  itemType?: 'redpacket' | 'bomb';
-  packetConfig?: RedPacketConfig;
-  baseScore?: number;
-}
+interface FallingItem extends PowerUpItem {}
 
 export class GameScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite;
@@ -39,6 +38,10 @@ export class GameScene extends Phaser.Scene {
   private totalMaxCombo!: number;
   private levelsCompleted!: number;
   private startLevel!: number;
+  private buffManager!: BuffManager;
+  private shieldEffect!: Phaser.GameObjects.Graphics | null;
+  private slowMotionEffect!: Phaser.GameObjects.Graphics | null;
+  private doubleScoreEffect!: Phaser.GameObjects.Text | null;
 
   constructor() {
     super('GameScene');
@@ -72,15 +75,20 @@ export class GameScene extends Phaser.Scene {
     this.lastComboTime = 0;
     this.isGameActive = true;
     this.pointerActive = { left: false, right: false };
+    this.shieldEffect = null;
+    this.slowMotionEffect = null;
+    this.doubleScoreEffect = null;
   }
 
   create(): void {
     this.addBackground();
     this.createPlayer();
+    this.createBuffManager();
     this.createUI();
     this.createFallingItems();
     this.setupCollisions();
     this.setupInput();
+    this.setupBuffCallbacks();
     this.startGameLoop();
     this.showLevelStart();
   }
@@ -366,7 +374,8 @@ export class GameScene extends Phaser.Scene {
       difficulty
     );
 
-    const isBomb = Math.random() < bombChance;
+    const powerUpConfig = shouldSpawnPowerUp();
+    const isBomb = !powerUpConfig && Math.random() < bombChance;
 
     let item: FallingItem;
     item = this.items.get(
@@ -379,7 +388,17 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    if (isBomb) {
+    item.powerUpType = undefined;
+    item.powerUpConfig = undefined;
+
+    if (powerUpConfig) {
+      item.setTexture(`powerup_${powerUpConfig.type}`);
+      item.itemType = 'powerup';
+      item.powerUpType = powerUpConfig.type;
+      item.powerUpConfig = powerUpConfig;
+      item.packetConfig = undefined;
+      item.baseScore = undefined;
+    } else if (isBomb) {
       item.setTexture('bomb');
       item.itemType = 'bomb';
       item.packetConfig = undefined;
@@ -401,11 +420,15 @@ export class GameScene extends Phaser.Scene {
     }
     item.setScale(1);
 
-    const fallSpeed = Phaser.Math.Linear(
+    let fallSpeed = Phaser.Math.Linear(
       diff.fallSpeed.min,
       diff.fallSpeed.max,
       difficulty
     ) * Phaser.Math.FloatBetween(0.85, 1.15);
+
+    if (this.buffManager.hasBuff('slow_motion')) {
+      fallSpeed *= 0.45;
+    }
 
     item.setVelocityY(fallSpeed);
     item.setVelocityX(Phaser.Math.FloatBetween(-30, 30));
@@ -437,6 +460,8 @@ export class GameScene extends Phaser.Scene {
       this.collectRedPacket(fallingItem);
     } else if (fallingItem.itemType === 'bomb') {
       this.hitBomb(fallingItem);
+    } else if (fallingItem.itemType === 'powerup') {
+      this.collectPowerUp(fallingItem);
     }
 
     fallingItem.setActive(false);
@@ -466,14 +491,20 @@ export class GameScene extends Phaser.Scene {
 
     const baseScore = item.baseScore || 10;
     const comboBonus = Math.floor(baseScore * this.gameState.combo * GAME_CONFIG.comboBonusMultiplier);
-    const totalScore = baseScore + comboBonus;
+    let totalScore = baseScore + comboBonus;
+
+    if (this.buffManager.hasBuff('double_score')) {
+      totalScore *= 2;
+    }
+
     this.gameState.levelScore += totalScore;
     this.gameState.totalScore += totalScore;
 
     this.updateScore();
     this.updateProgressBar();
     this.showCombo();
-    this.showScorePopup(item.x, item.y, totalScore);
+    this.showScorePopup(item.x, item.y, totalScore,
+      this.buffManager.hasBuff('double_score'));
 
     this.cameras.main.shake(100, 0.005);
 
@@ -492,6 +523,34 @@ export class GameScene extends Phaser.Scene {
   }
 
   private hitBomb(item: FallingItem): void {
+    if (this.buffManager.hasBuff('shield')) {
+      this.cameras.main.shake(150, 0.01);
+      this.add.particles(item.x, item.y, 'particle', {
+        speedY: { min: 80, max: 150 },
+        speedX: { min: -100, max: 100 },
+        angle: { min: 0, max: 360 },
+        scale: { start: 0.6, end: 0 },
+        lifespan: 500,
+        quantity: 15,
+        tint: 0x2ecc71,
+      });
+      const shieldText = this.add.text(item.x, item.y - 20, '护盾抵挡!', {
+        fontSize: '18px',
+        fontFamily: 'Microsoft YaHei',
+        color: '#2ecc71',
+        stroke: '#000000',
+        strokeThickness: 2,
+      }).setOrigin(0.5);
+      this.tweens.add({
+        targets: shieldText,
+        y: shieldText.y - 30,
+        alpha: { from: 1, to: 0 },
+        duration: 800,
+        onComplete: () => shieldText.destroy(),
+      });
+      return;
+    }
+
     this.gameState.lives--;
     this.gameState.combo = 0;
     this.updateHearts();
@@ -598,14 +657,28 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
-  private showScorePopup(x: number, y: number, score: number): void {
-    const popup = this.add.text(x, y, `+${score}`, {
-      fontSize: '24px',
+  private showScorePopup(x: number, y: number, score: number, isDouble: boolean = false): void {
+    const text = isDouble ? `+${score} x2!` : `+${score}`;
+    const color = isDouble ? '#9b59b6' : '#ffd700';
+    const fontSize = isDouble ? '28px' : '24px';
+
+    const popup = this.add.text(x, y, text, {
+      fontSize,
       fontFamily: 'Microsoft YaHei',
-      color: '#ffd700',
+      color,
       stroke: '#000000',
       strokeThickness: 3,
     }).setOrigin(0.5);
+
+    if (isDouble) {
+      this.tweens.add({
+        targets: popup,
+        scale: { from: 0.5, to: 1.3 },
+        duration: 200,
+        ease: 'Back.easeOut',
+        yoyo: true,
+      });
+    }
 
     this.tweens.add({
       targets: popup,
@@ -689,12 +762,235 @@ export class GameScene extends Phaser.Scene {
       }
       return null;
     });
+
+    this.buffManager.update();
+    this.updateShieldEffect();
+  }
+
+  private createBuffManager(): void {
+    this.buffManager = new BuffManager(this);
+  }
+
+  private setupBuffCallbacks(): void {
+    this.buffManager.onBuffStart('shield', () => {
+      this.createShieldEffect();
+    });
+    this.buffManager.onBuffEnd('shield', () => {
+      this.removeShieldEffect();
+    });
+
+    this.buffManager.onBuffStart('slow_motion', () => {
+      this.createSlowMotionEffect();
+    });
+    this.buffManager.onBuffEnd('slow_motion', () => {
+      this.removeSlowMotionEffect();
+      this.updateAllItemSpeeds();
+    });
+
+    this.buffManager.onBuffStart('double_score', () => {
+      this.createDoubleScoreEffect();
+    });
+    this.buffManager.onBuffEnd('double_score', () => {
+      this.removeDoubleScoreEffect();
+    });
+  }
+
+  private collectPowerUp(item: FallingItem): void {
+    if (!item.powerUpType || !item.powerUpConfig) return;
+
+    this.buffManager.addBuff(item.powerUpType, item.powerUpConfig.duration);
+
+    this.add.particles(item.x, item.y, 'particle', {
+      speedY: { min: 50, max: 150 },
+      speedX: { min: -100, max: 100 },
+      angle: { min: 0, max: 360 },
+      scale: { start: 0.7, end: 0 },
+      lifespan: 500,
+      quantity: 20,
+      tint: item.powerUpConfig.color,
+    });
+
+    this.lastComboTime = this.time.now;
+  }
+
+  private createShieldEffect(): void {
+    if (this.shieldEffect) {
+      this.shieldEffect.destroy();
+    }
+
+    this.shieldEffect = this.add.graphics();
+    this.shieldEffect.setDepth(15);
+
+    this.updateShieldEffect();
+
+    this.tweens.add({
+      targets: this.player,
+      scale: { from: 0.9, to: 1.05 },
+      duration: 300,
+      ease: 'Back.easeOut',
+      yoyo: true,
+      repeat: -1,
+      hold: 500,
+    });
+  }
+
+  private updateShieldEffect(): void {
+    if (!this.shieldEffect || !this.buffManager.hasBuff('shield')) return;
+
+    this.shieldEffect.clear();
+    const radius = 55 + Math.sin(this.time.now * 0.005) * 5;
+    const alpha = 0.3 + Math.sin(this.time.now * 0.008) * 0.15;
+
+    this.shieldEffect.lineStyle(3, 0x2ecc71, alpha + 0.3);
+    this.shieldEffect.fillStyle(0x2ecc71, alpha);
+    this.shieldEffect.beginPath();
+    this.shieldEffect.arc(this.player.x, this.player.y, radius, 0, Math.PI * 2);
+    this.shieldEffect.strokePath();
+    this.shieldEffect.fillPath();
+
+    for (let i = 0; i < 3; i++) {
+      const angle = (this.time.now * 0.002 + i * 2.094) % (Math.PI * 2);
+      const dotX = this.player.x + Math.cos(angle) * radius;
+      const dotY = this.player.y + Math.sin(angle) * radius;
+      this.shieldEffect.fillStyle(0xffffff, 0.8);
+      this.shieldEffect.beginPath();
+      this.shieldEffect.arc(dotX, dotY, 4, 0, Math.PI * 2);
+      this.shieldEffect.fillPath();
+    }
+  }
+
+  private removeShieldEffect(): void {
+    if (this.shieldEffect) {
+      this.tweens.add({
+        targets: this.shieldEffect,
+        alpha: 0,
+        duration: 300,
+        onComplete: () => {
+          if (this.shieldEffect) {
+            this.shieldEffect.destroy();
+            this.shieldEffect = null;
+          }
+        },
+      });
+    }
+    this.player.setScale(0.9);
+  }
+
+  private createSlowMotionEffect(): void {
+    if (this.slowMotionEffect) {
+      this.slowMotionEffect.destroy();
+    }
+
+    this.slowMotionEffect = this.add.graphics();
+    this.slowMotionEffect.setDepth(5);
+    this.slowMotionEffect.fillStyle(0x3498db, 0.12);
+    this.slowMotionEffect.fillRect(0, 0, GAME_CONFIG.width, GAME_CONFIG.height);
+
+    this.updateAllItemSpeeds();
+
+    const slowText = this.add.text(GAME_CONFIG.width / 2, 250, '⏱ 时间减缓 ⏱', {
+      fontSize: '32px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#3498db',
+      stroke: '#ffffff',
+      strokeThickness: 4,
+    }).setOrigin(0.5).setAlpha(0);
+
+    this.tweens.add({
+      targets: slowText,
+      alpha: { from: 0, to: 1 },
+      scale: { from: 0.5, to: 1.2 },
+      duration: 400,
+      ease: 'Back.easeOut',
+      yoyo: true,
+      hold: 200,
+      onComplete: () => slowText.destroy(),
+    });
+  }
+
+  private removeSlowMotionEffect(): void {
+    if (this.slowMotionEffect) {
+      this.tweens.add({
+        targets: this.slowMotionEffect,
+        alpha: 0,
+        duration: 300,
+        onComplete: () => {
+          if (this.slowMotionEffect) {
+            this.slowMotionEffect.destroy();
+            this.slowMotionEffect = null;
+          }
+        },
+      });
+    }
+  }
+
+  private updateAllItemSpeeds(): void {
+    const difficulty = this.getCurrentDifficulty();
+    const diff = this.levelConfig.difficulty;
+    const baseSpeed = Phaser.Math.Linear(
+      diff.fallSpeed.min,
+      diff.fallSpeed.max,
+      difficulty
+    );
+
+    this.items.children.each((child) => {
+      const item = child as FallingItem;
+      if (item.active && item.body) {
+        let speed = baseSpeed * Phaser.Math.FloatBetween(0.85, 1.15);
+        if (this.buffManager.hasBuff('slow_motion')) {
+          speed *= 0.45;
+        }
+        item.setVelocityY(speed);
+      }
+      return null;
+    });
+  }
+
+  private createDoubleScoreEffect(): void {
+    if (this.doubleScoreEffect) {
+      this.doubleScoreEffect.destroy();
+    }
+
+    this.doubleScoreEffect = this.add.text(GAME_CONFIG.width / 2, 70, 'x2 双倍得分!', {
+      fontSize: '24px',
+      fontFamily: 'Microsoft YaHei',
+      color: '#9b59b6',
+      stroke: '#ffffff',
+      strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(50);
+
+    this.tweens.add({
+      targets: this.doubleScoreEffect,
+      scale: { from: 0.8, to: 1.1 },
+      duration: 500,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+    });
+  }
+
+  private removeDoubleScoreEffect(): void {
+    if (this.doubleScoreEffect) {
+      this.tweens.add({
+        targets: this.doubleScoreEffect,
+        alpha: 0,
+        scale: 0.5,
+        duration: 300,
+        onComplete: () => {
+          if (this.doubleScoreEffect) {
+            this.doubleScoreEffect.destroy();
+            this.doubleScoreEffect = null;
+          }
+        },
+      });
+    }
   }
 
   private clearTimers(): void {
     if (this.gameTimer) this.gameTimer.remove();
     if (this.spawnTimer) this.spawnTimer.remove();
     if (this.comboTimer) this.comboTimer.remove();
+    if (this.buffManager) this.buffManager.clearAll();
   }
 
   private stopAllItems(): void {
